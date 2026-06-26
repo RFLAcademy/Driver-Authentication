@@ -1,0 +1,165 @@
+// Phase 1 — Face Detection (RFL Academy template, real screenshots preserved)
+const fs = require("fs");
+const path = require("path");
+const { Packer } = require("docx");
+const T = require("../_assets/rfl_template.js");
+const { SEC, SUBSEC, P, bullet, callout, code, dataTable, steps, imgPlaceholder, titleBlock, oneUp, twoUp, spacer, buildDoc, CONTENT_W } = T;
+
+const IMGDIR = path.join(__dirname, "..", "_assets", "phase1_images");
+const img = (n) => fs.readFileSync(path.join(IMGDIR, `img_${String(n).padStart(2, "0")}.png`));
+
+const children = [
+  ...titleBlock("Face Detection", "Multi-Factor Driver Authentication System  ·  Phase 1"),
+
+  SEC("Overview", 1),
+  P("Phase 1 implements the core computer-vision pipeline: face detection, driver registration, real-time face recognition, and automatic LED lighting control. It is software-only and runs on a standard PC or Raspberry Pi with an attached USB/CSI camera."),
+  SUBSEC("1.1 Project Context"),
+  P("Modern commercial vehicles require secure authentication to prevent unauthorized use. Phase 1 replaces key-based access with face recognition, using a multi-pose registration process (inspired by iPhone Face ID) to build a robust facial model that works under varying lighting conditions."),
+  SUBSEC("1.2 Key Features"),
+  bullet("Strict Haar Cascade face detection (centre-zone only, high confidence)"),
+  bullet("iPhone-style multi-pose registration — 5 poses × 2 lighting conditions × 20 samples = 200 samples"),
+  bullet("LBPH (Local Binary Patterns Histogram) face recognizer"),
+  bullet("Multiple-face alert — access blocked if more than one person is detected"),
+  bullet("Debounced LED relay control — hysteresis prevents flickering"),
+  bullet("CSV event logging with timestamps"),
+  spacer(),
+  callout("Phase Scope", "Phase 1 covers face detection, registration, and authentication only. Fingerprint authentication and SD-card logging are later-phase features."),
+
+  SEC("System Architecture", 2),
+  SUBSEC("2.1 Module Overview"),
+  dataTable(["Module", "Responsibility"], [
+    ["Face Detection", "Detects faces in the centre zone using OpenCV Haar Cascades with strict parameters (minNeighbors=8, minSize=100×100)."],
+    ["Registration", "Guides the driver through 5 poses × 2 lighting conditions, capturing 20 frames per sub-pass, and trains LBPH."],
+    ["Authentication", "Compares the live face ROI against the stored LBPH model; grants or denies based on a confidence threshold."],
+    ["LED Controller", "Measures central-ROI brightness and debounces LED relay changes with a confirmation timer."],
+  ], [2400, CONTENT_W - 2400]),
+  spacer(),
+  SUBSEC("2.2 System Flow"),
+  P("Camera Input → Face Detection → [Registration path / Authentication path] → LED Control → CSV Log."),
+  ...oneUp(img(1), "System flow diagram — the full authentication pipeline", 380),
+
+  SEC("Face Detection", 3),
+  SUBSEC("3.1 Method"),
+  P("Phase 1 uses OpenCV's Haar Cascade classifier (haarcascade_frontalface_default.xml). Detection is restricted to the centre zone of each frame — inset from the edges — to prevent background objects from triggering false detections."),
+  SUBSEC("3.2 Detection Parameters"),
+  dataTable(["Constant", "Value", "Description"], [
+    ["DETECT_SCALE", "1.1", "Image-pyramid scale factor (smaller = more detections, slower)"],
+    ["DETECT_MIN_NEIGHBORS", "8", "Min neighbour rectangles (higher = fewer false positives)"],
+    ["DETECT_MIN_SIZE", "(100, 100)", "Minimum face size in pixels"],
+    ["DETECT_ZONE_X", "80 px", "Horizontal inset of the detection zone"],
+    ["DETECT_ZONE_Y", "60 px", "Vertical inset of the detection zone"],
+  ], [3000, 1700, CONTENT_W - 4700]),
+  spacer(),
+  SUBSEC("3.3 Multiple Face Handling"),
+  P("If more than one face is detected during authentication, a full-width alert banner is shown and access is denied until only one face remains. All multi-face events are logged."),
+  twoUp(img(2), "Single face — normal detection", img(3), "Multiple-face alert — access blocked"),
+  SUBSEC("3.4 Detection During Registration"),
+  P("During registration, detection is deliberately relaxed (minNeighbors=4, minSize=60×60) to accommodate angled head poses that would otherwise fail the strict authentication-mode detector."),
+
+  SEC("Driver Registration", 4),
+  SUBSEC("4.1 Overview"),
+  P("Registration follows an iPhone Face ID-style guided capture. The driver completes five head-pose steps; each is captured twice — once under normal lighting and once under simulated low light — ensuring the model is robust to varying conditions."),
+  callout("Sample Count", "Each sub-pass captures 20 samples (SAMPLES_PER_STEP). Total = 5 poses × 2 lighting × 20 samples = 200 training samples stored in driver1_face.npy.", T.GREEN, "EAF7EF"),
+  spacer(),
+  SUBSEC("4.2 Registration Steps"),
+  steps([
+    ["Look straight at the camera", "Baseline frontal view — captured in normal and low light"],
+    ["Slowly turn head RIGHT", "Right-profile variation"],
+    ["Slowly turn head LEFT", "Left-profile variation"],
+    ["Tilt head UP", "Upward-gaze variation"],
+    ["Tilt head DOWN", "Downward-gaze variation"],
+  ]),
+  spacer(),
+  SUBSEC("4.3 Registration UI"),
+  twoUp(img(4), "Step 1 — Look straight (normal light)", img(5), "Step 1 — Look straight (low light)"),
+  twoUp(img(6), "Step 2 — Turn right", img(7), "Step 3 — Turn left"),
+  twoUp(img(8), "Step 4 — Tilt up", img(9), "Step 5 — Tilt down"),
+  ...oneUp(img(10), "Registration complete — “Driver 1 Registered!”", 360),
+
+  SEC("Authentication", 5),
+  SUBSEC("5.1 Recognizer"),
+  P("Phase 1 uses OpenCV's LBPH face recognizer. LBPH divides the face ROI into a grid of cells, computes texture histograms per cell, and compares them to the training set. It performs well under minor lighting and pose changes."),
+  SUBSEC("5.2 Match Threshold"),
+  P("Lower confidence means a better match. The threshold is configured as:"),
+  code(["MATCH_THRESHOLD = 75", "# granted if label == 1 and confidence < 75"]),
+  spacer(),
+  SUBSEC("5.3 Authentication States"),
+  dataTable(["State", "Condition", "Visual Feedback"], [
+    ["Access Granted", "label=1, conf < 75", "Green box, 'DRIVER 1 — MATCHED', score"],
+    ["Access Denied", "label≠1 or conf ≥ 75", "Red box, 'NOT MATCHED', 'Access Denied'"],
+    ["No Driver", "driver1_face.npy missing", "Orange banner — 'Press R to set up Face ID'"],
+    ["Multiple Faces", "len(faces) > 1", "Red full-width alert banner"],
+    ["No Face", "len(faces) == 0", "Status bar cleared — waiting"],
+  ], [2100, 2500, CONTENT_W - 4600]),
+  spacer(),
+  SUBSEC("5.4 Authentication Screenshots"),
+  twoUp(img(11), "Access granted — green box, confidence shown", img(12), "Access denied — red box, NOT MATCHED"),
+
+  SEC("LED Auto-Lighting", 6),
+  SUBSEC("6.1 Brightness Measurement"),
+  P("Each frame, the system measures average pixel brightness in a central region:"),
+  code([
+    "def measure_brightness(frame):",
+    "    h, w = frame.shape[:2]",
+    "    cx, cy = w // 2, h // 2",
+    "    roi = frame[cy-75:cy+75, cx-100:cx+100]",
+    "    return float(np.mean(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)))",
+  ]),
+  spacer(),
+  SUBSEC("6.2 Thresholds"),
+  dataTable(["Constant", "Value", "Description"], [
+    ["BRIGHTNESS_LOW", "60", "Below this, LED turns ON (low light)"],
+    ["BRIGHTNESS_OK", "80", "Above this, LED turns OFF (good light)"],
+    ["LED_CONFIRM_SECS", "5.0", "Stable-state seconds before the LED switches"],
+  ], [2900, 1500, CONTENT_W - 4400]),
+  spacer(),
+  SUBSEC("6.3 Hysteresis / Flicker Fix"),
+  P("The LED controller debounces state changes: the LED only switches if brightness stays past the threshold for the confirmation window, preventing rapid toggling from noise or momentary shadows."),
+  twoUp(img(13), "LED ON — low light detected", img(14), "LED OFF — good light"),
+  SUBSEC("6.4 Hardware Note"),
+  callout("Hardware Flag", "RELAY_LED_HARDWARE = False by default. In software-only mode the LED state is printed and logged; physical relay control arrives in Phase 3."),
+
+  SEC("Event Logging", 7),
+  SUBSEC("7.1 CSV Log Format"),
+  dataTable(["Field", "Example", "Description"], [
+    ["Timestamp", "2025-05-18 14:32:07", "Date and time of the event"],
+    ["Event", "FACE_MATCH", "Event type identifier"],
+    ["Detail", "conf=42.3", "Additional context"],
+    ["Result", "GRANTED", "Outcome of the event"],
+  ], [1900, 2400, CONTENT_W - 4300]),
+  spacer(),
+  SUBSEC("7.2 Logged Events"),
+  bullet("SYSTEM_STARTED, DRIVER_1_REGISTERED, FACE_MATCH, FACE_NO_MATCH, MULTIPLE_FACES, LED_RELAY, SYSTEM_STOPPED"),
+  SUBSEC("7.3 Log Screenshot"),
+  ...oneUp(img(15), "auth_log.csv — timestamped event log", 540),
+
+  SEC("Configuration Reference", 8),
+  dataTable(["Constant", "Value", "Description"], [
+    ["CAMERA_INDEX", "0", "Camera device index"],
+    ["FRAME_WIDTH / HEIGHT", "640 × 480", "Capture resolution"],
+    ["DRIVER_FACE_FILE", "driver1_face.npy", "Saved LBPH model"],
+    ["LOG_FILE", "auth_log.csv", "Event log path"],
+    ["MATCH_THRESHOLD", "75", "Max LBPH confidence for a match"],
+    ["SAMPLES_PER_STEP", "20", "Samples per lighting sub-pass"],
+    ["BRIGHTNESS_LOW / OK", "60 / 80", "LED on/off brightness thresholds"],
+    ["RELAY_LED_HARDWARE", "False", "Enable GPIO relay output"],
+  ], [3000, 1900, CONTENT_W - 4900]),
+
+  SEC("Controls, Limitations & Next", 9),
+  SUBSEC("9.1 Controls & Running"),
+  P("R — start driver registration (re-registration overwrites the model). Q — quit cleanly, releasing the camera and saving the log."),
+  code(["pip install opencv-python opencv-contrib-python numpy", "python driver_auth_phase1.py"]),
+  spacer(),
+  SUBSEC("9.2 Known Limitations"),
+  bullet("Haar detection can fail at extreme head angles (>45°), mitigated by relaxed registration parameters."),
+  bullet("LBPH accuracy drops with drastic lighting changes not covered during registration."),
+  bullet("Only one driver profile (Driver 1) is supported in Phase 1."),
+  bullet("LED control is software-only in Phase 1 (physical relay arrives in Phase 3)."),
+  spacer(),
+  SUBSEC("9.3 What Comes Next — Phase 2"),
+  bullet("Fingerprint sensor integration as a second authentication factor"),
+  bullet("Dual-factor access decision combining face and fingerprint"),
+];
+
+const doc = buildDoc({ runningTitle: "Multi-Factor Driver Authentication System  |  Phase 1 Documentation", children });
+Packer.toBuffer(doc).then(buf => { fs.writeFileSync(__dirname + "/Phase1_Documentation.docx", buf); console.log("WROTE Phase1 (" + buf.length + " bytes)"); });

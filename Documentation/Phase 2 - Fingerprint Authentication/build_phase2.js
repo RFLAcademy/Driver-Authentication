@@ -1,0 +1,116 @@
+// Phase 2 — Fingerprint Authentication (RFL Academy template)
+const fs = require("fs");
+const { Packer } = require("docx");
+const T = require("../_assets/rfl_template.js");
+const { SEC, SUBSEC, P, bullet, callout, code, dataTable, steps, imgPlaceholder, titleBlock, spacer, pb, buildDoc, CONTENT_W } = T;
+
+const children = [
+  ...titleBlock("Fingerprint Authentication", "Multi-Factor Driver Authentication System  ·  Phase 2"),
+
+  SEC("Overview", 1),
+  P("Phase 2 adds fingerprint authentication as a second, independent identity factor. Where Phase 1 granted access on a face match alone, Phase 2 combines face recognition with a physical fingerprint scan from an R307S optical sensor, so the vehicle is only authorised when both factors agree."),
+  SUBSEC("1.1 Project Context"),
+  P("A face match alone can be spoofed with a photograph and offers no proof that the authorised driver is physically present. Phase 2 introduces a biometric “something you are” factor requiring live finger contact. The module runs in two modes — a software simulation for development on any PC, and a real-sensor mode driven by the R307S over UART on the Raspberry Pi — selected by a single configuration flag."),
+  SUBSEC("1.2 Key Features"),
+  bullet("R307S optical fingerprint sensor over UART (/dev/ttyAMA0, 57600 baud) via the pyfingerprint library"),
+  bullet("Two-scan guided enrollment with same-finger confirmation before the template is stored"),
+  bullet("On-sensor template storage at slot #1, with a disk flag (fingerprint_enrolled.flag) so enrollment persists across restarts"),
+  bullet("Dual-factor decision: access GRANTED only when face AND fingerprint both match"),
+  bullet("Live UI feedback driven by four scan states — WAITING, SCANNING, LIFT, DONE"),
+  bullet("Simulation mode (USE_REAL_SENSOR = False) for development without hardware"),
+  spacer(),
+  callout("Phase Scope", "Phase 2 covers fingerprint enrollment, verification, and the dual-factor access decision. Relay-driven ignition control and SMS remote operation are documented in later phases."),
+
+  SEC("Fingerprint Hardware", 2),
+  SUBSEC("2.1 Sensor"),
+  P("Phase 2 uses the R307S optical fingerprint sensor, which performs image capture, feature extraction, template storage, and matching on-board. The Raspberry Pi communicates over a UART serial link; all matching happens inside the sensor, so no fingerprint images are stored on the Pi."),
+  SUBSEC("2.2 Wiring"),
+  P("The R307S exposes six wires. The blue TOUCH line signals finger presence and is read as an active-low GPIO input with an internal pull-up."),
+  dataTable(["Wire", "Signal", "Pi Pin", "Notes"], [
+    ["Red", "VCC", "Pin 4 (5V)", "Sensor power"],
+    ["Black", "GND", "Pin 6 (GND)", "Common ground with Pi"],
+    ["Yellow", "TXD", "Pin 10 (RX / GPIO15)", "Sensor TX → Pi RX"],
+    ["Green", "RXD", "Pin 8 (TX / GPIO14)", "Pi TX → Sensor RX"],
+    ["Blue", "TOUCH", "Pin 11 (GPIO17)", "Active-low finger-presence"],
+    ["White", "WAKEUP", "—", "Leave floating"],
+  ], [1100, 1300, 3000, CONTENT_W - 5400]),
+  spacer(),
+  callout("Serial Setup (one-time)", "Run sudo raspi-config → Interface Options → Serial Port. Set “Login shell over serial?” to No and “Serial hardware enabled?” to Yes, then reboot. On Pi 4 the sensor port is /dev/ttyAMA0."),
+  spacer(),
+  SUBSEC("2.3 Hardware Test Script"),
+  P("Code/Test/fingerprint_test.py validates the wiring before integration. It runs seven checks: sensor info (template count and capacity), the blue TOUCH wire, raw image capture over UART, a combined touch-then-capture flow, enrollment into slot 1, verification, and template deletion."),
+  imgPlaceholder("R307S Hardware Test Output"),
+
+  SEC("Fingerprint Enrollment", 3),
+  SUBSEC("3.1 Overview"),
+  P("Enrollment registers Driver 1's fingerprint once; it then persists for every future run. The driver scans the same finger twice — the second scan confirms the first — and the sensor combines them into a single template stored in its own memory."),
+  callout("Enroll Once, Verify Forever", "After a successful enrollment the template lives in the sensor at slot #1, and a fingerprint_enrolled.flag file is written to disk. Because the flag survives restarts, the system never asks the driver to re-enroll unless the flag is explicitly cleared.", T.GREEN, "EAF7EF"),
+  spacer(),
+  SUBSEC("3.2 Enrollment Steps"),
+  steps([
+    ["Place finger on the sensor", "First scan — the sensor captures the image into CharBuffer 1"],
+    ["Remove finger when prompted", "Brief pause before the confirmation scan"],
+    ["Place the SAME finger again", "Second scan into CharBuffer 2 — confirms the first capture"],
+    ["Template created and stored", "Sensor compares the two scans, builds the template, and stores it at slot #1"],
+  ]),
+  spacer(),
+  P("If the two scans do not match (compareCharacteristics returns 0), enrollment fails and must be retried. On success, the template is written with storeTemplate() and the enrollment flag is saved."),
+  SUBSEC("3.3 Enrollment UI"),
+  P("During enrollment the on-screen panel shows the live scan state and a step checklist that fills in as each stage completes. The flow auto-completes when the template is saved."),
+  imgPlaceholder("Fingerprint Enrollment — In Progress  /  Complete"),
+
+  SEC("Verification & Dual-Factor", 4),
+  SUBSEC("4.1 Verification"),
+  P("Verification captures a single live scan and calls searchTemplate(), which compares it against every template in the sensor's memory and returns the matching slot and a raw score. The module converts that raw score into a confidence percentage for display and logging."),
+  code([
+    "result = f.searchTemplate()",
+    "slot, score = result[0], result[1]",
+    "if slot == -1:    return False, confidence   # no template matched (~20-45%)",
+    "confidence = round(min(99.9, score / 2.0), 1)",
+    "return True, confidence                       # MATCH at this slot",
+  ]),
+  P("A verification attempt waits up to SENSOR_TIMEOUT (15 seconds) for a finger; if none is placed, it returns as a timeout (no match)."),
+  SUBSEC("4.2 Scan States"),
+  dataTable(["State", "Meaning", "On-screen Prompt"], [
+    ["WAITING", "Sensor ready, no finger yet", "“Place your finger on the sensor”"],
+    ["SCANNING", "Finger detected, capturing image", "“Hold still — Scanning”"],
+    ["LIFT", "Capture done, finger can be removed", "“Lift your finger”"],
+    ["DONE", "Result ready (match / no match)", "Shows MATCHED or NO MATCH with confidence"],
+  ], [1600, 4000, CONTENT_W - 5600]),
+  spacer(),
+  SUBSEC("4.3 Dual-Factor Decision"),
+  P("The face and fingerprint results are combined into a single access decision by logger.log_session(). In full authentication mode, both factors must succeed:"),
+  code(["final = \"GRANTED\" if (face_matched and fp_matched) else \"DENIED\""]),
+  spacer(),
+  callout("Face-Only Auto-Check", "A lightweight “auto-check” mode (face_only = True) skips the fingerprint and decides on the face alone. It is used for passive presence detection — not for granting ignition — and a failed auto-check raises the “UNAUTHORISED INDIVIDUAL DETECTED” alert. Full ignition-granting authentication always requires both factors."),
+
+  SEC("Configuration & Usage", 5),
+  P("All fingerprint parameters are defined at the top of fingerprint_sim.py. The single most important flag is USE_REAL_SENSOR, which switches between the real R307S and the software simulation."),
+  dataTable(["Constant", "Value", "Description"], [
+    ["SERIAL_PORT", "/dev/ttyAMA0", "Pi UART port for the R307S (COM port on Windows)"],
+    ["BAUD_RATE", "57600", "Sensor serial baud rate"],
+    ["SENSOR_TIMEOUT", "15", "Seconds to wait for a finger before timing out"],
+    ["ENROLLED_ID", "1", "Sensor template slot used for Driver 1"],
+    ["USE_REAL_SENSOR", "True", "True = real R307S over UART; False = simulation"],
+    ["TOUCH_GPIO", "17", "BCM pin for the blue TOUCH wire (active-low)"],
+  ], [2600, 2400, CONTENT_W - 5000]),
+  spacer(),
+  code([
+    "pip install pyfingerprint pyserial --break-system-packages",
+    "python3 fingerprint_sim.py        # built-in enroll / verify menu",
+    "python3 Test/fingerprint_test.py  # full 7-step hardware test",
+  ]),
+  spacer(),
+  SUBSEC("5.1 Known Limitations"),
+  bullet("Only one driver fingerprint (slot #1) is enrolled in Phase 2; multi-driver enrollment is a later phase."),
+  bullet("Dry, wet, or dirty fingers reduce optical-sensor match scores and may require a re-scan."),
+  bullet("The R307S requires a common ground with the Pi and a stable 5V supply; a brownout causes UART init to fail."),
+  bullet("Confidence percentages are derived from the sensor's internal score and are indicative, not calibrated error rates."),
+  spacer(),
+  SUBSEC("5.2 What Comes Next — Phase 3"),
+  bullet("3-channel relay control via the timer latch, LED, and ignition channels"),
+  bullet("Ignition enabled only on a successful dual-factor GRANTED decision"),
+];
+
+const doc = buildDoc({ runningTitle: "Multi-Factor Driver Authentication System  |  Phase 2 Documentation", children });
+Packer.toBuffer(doc).then(buf => { fs.writeFileSync(__dirname + "/Phase2_Documentation.docx", buf); console.log("WROTE Phase2 (" + buf.length + " bytes)"); });
